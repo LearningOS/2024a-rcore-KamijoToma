@@ -24,6 +24,7 @@ fn insert_app_data() -> Result<()> {
         })
         .collect();
     apps.sort();
+    println!("App lens: {}", apps.len());
 
     writeln!(
         f,
