@@ -14,8 +14,11 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
+use crate::config::{MAX_SYSCALL_NUM, PAGE_SIZE};
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::{MapPermission, VPNRange, VirtAddr};
 use crate::sync::UPSafeCell;
+use crate::timer::get_time_ms;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
 use lazy_static::*;
@@ -79,6 +82,7 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let next_task = &mut inner.tasks[0];
         next_task.task_status = TaskStatus::Running;
+        next_task.first_schedule_time = get_time_ms();
         let next_task_cx_ptr = &next_task.task_cx as *const TaskContext;
         drop(inner);
         let mut _unused = TaskContext::zero_init();
@@ -140,6 +144,9 @@ impl TaskManager {
             let mut inner = self.inner.exclusive_access();
             let current = inner.current_task;
             inner.tasks[next].task_status = TaskStatus::Running;
+            if inner.tasks[next].first_schedule_time == 0 {
+                inner.tasks[next].first_schedule_time = get_time_ms();
+            }
             inner.current_task = next;
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
@@ -153,8 +160,88 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
-}
 
+    /// Get current task first schedule time
+    pub fn get_task_schedule_time(&self) -> usize{
+        let inner = self.inner.exclusive_access();
+        inner.tasks[inner.current_task].first_schedule_time
+    }
+
+    /// Get current task syscall_count
+    pub fn get_syscall_count(&self) -> Vec<u32>{
+        let inner = self.inner.exclusive_access();
+        inner.tasks[inner.current_task].syscall_count.clone()
+    }
+
+    /// Count current task syscall
+    pub fn count_task_syscall(&self, syscall: usize){
+        if syscall>MAX_SYSCALL_NUM {
+            warn!("Invalid syscall id {}", syscall);
+            return;
+        }
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].syscall_count[syscall] += 1;
+    }
+
+    /// Get task status
+    pub fn get_task_status(&self) -> TaskStatus {
+        let inner = self.inner.exclusive_access();
+        inner.tasks[inner.current_task].task_status
+    }
+
+    /// mmap
+    pub fn mmap(&self, start: usize, len: usize, perm: usize) -> isize {
+        if start % PAGE_SIZE != 0 || (perm & !0x7) != 0 || (perm & 0x7) == 0 {
+            return -1;
+        }
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let task = &mut inner.tasks[current];
+        let start_va = VirtAddr::from(start);
+        let end_va = VirtAddr::from(start+len);
+        // Check if mapped in the range
+        if task.memory_set.check_anything_mapped(start_va, end_va) {
+            return -1;
+        }
+        let map_perm = MapPermission::from_bits((perm as u8) << 1).unwrap() | MapPermission::U;
+        task.memory_set.insert_framed_area(start_va, end_va, map_perm);
+        // Check if any range is unmapped
+        if VPNRange::new(start_va.floor(), end_va.ceil()).into_iter().map(|x| {
+            if let Some(pte) = task.memory_set.translate(x){
+                pte.is_valid()
+            }else{
+                false
+            }
+        }).any(|x| !x) {
+            return -1;
+        }
+        0
+    }
+
+    /// unmap memory
+    pub fn unmmap(&self, start: usize, len: usize) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let task = &mut inner.tasks[current];
+        let start_va = VirtAddr::from(start);
+        let end_va = VirtAddr::from(start+len);
+        // Check if mapped in the range
+        if VPNRange::new(start_va.floor(), end_va.ceil()).into_iter().map(|x| {
+            if let Some(pte) = task.memory_set.translate(x){
+                pte.is_valid()
+            }else{
+                false
+            }
+        }).any(|x| !x) {
+            return -1;
+        }
+        match task.memory_set.delete_framed_area(start_va, end_va){
+            Ok(()) => 0,
+            Err(()) => -1
+        }
+    }
+}
 /// Run the first task in task list.
 pub fn run_first_task() {
     TASK_MANAGER.run_first_task();
@@ -201,4 +288,34 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Get current task first schedule time
+pub fn get_task_schedule_time() -> usize{
+    TASK_MANAGER.get_task_schedule_time()
+}
+
+/// Get current task syscall_count
+pub fn get_syscall_count() -> Vec<u32>{
+    TASK_MANAGER.get_syscall_count()
+}
+
+/// Count current task syscall
+pub fn count_task_syscall(syscall: usize){
+    TASK_MANAGER.count_task_syscall(syscall);
+}
+
+/// get task status
+pub fn get_task_status() -> TaskStatus {
+    TASK_MANAGER.get_task_status()
+}
+
+/// mmap
+pub fn mmap(start: usize, len: usize, perm: usize) -> isize {
+    TASK_MANAGER.mmap(start, len, perm)
+}
+
+/// unmmap
+pub fn unmmap(start: usize, len: usize) -> isize {
+    TASK_MANAGER.unmmap(start, len)
 }

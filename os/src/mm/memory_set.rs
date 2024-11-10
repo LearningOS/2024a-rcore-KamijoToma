@@ -63,6 +63,34 @@ impl MemorySet {
             None,
         );
     }
+    /// Delete framed area
+    pub fn delete_framed_area(
+        &mut self,
+        start_va: VirtAddr,
+        end_va: VirtAddr
+    ) -> Result<(), ()>{
+        if let Some(area) = self.areas.iter_mut().position(|area| area.start_va == start_va && area.end_va == end_va) {
+            self.areas[area].unmap(&mut self.page_table);
+            self.areas.remove(area);
+            Ok(())
+        }else{
+            Err(())
+        }
+    }
+    /// Check anything mapped
+    #[allow(unused)]
+    pub fn check_anything_mapped(
+        &self,
+        start_va: VirtAddr,
+        end_va: VirtAddr
+    ) -> bool{
+        !self.areas
+            .iter()
+            .all(|area| {
+                start_va.floor() >= area.vpn_range.get_end() ||
+                    end_va.ceil() <= area.vpn_range.get_start()
+            })
+    }
     fn push(&mut self, mut map_area: MapArea, data: Option<&[u8]>) {
         map_area.map(&mut self.page_table);
         if let Some(data) = data {
@@ -72,7 +100,7 @@ impl MemorySet {
     }
     /// Mention that trampoline is not collected by areas.
     fn map_trampoline(&mut self) {
-        self.page_table.map(
+        let _ = self.page_table.map(
             VirtAddr::from(TRAMPOLINE).into(),
             PhysAddr::from(strampoline as usize).into(),
             PTEFlags::R | PTEFlags::X,
@@ -269,6 +297,8 @@ pub struct MapArea {
     data_frames: BTreeMap<VirtPageNum, FrameTracker>,
     map_type: MapType,
     map_perm: MapPermission,
+    start_va: VirtAddr,
+    end_va: VirtAddr
 }
 
 impl MapArea {
@@ -285,6 +315,8 @@ impl MapArea {
             data_frames: BTreeMap::new(),
             map_type,
             map_perm,
+            start_va,
+            end_va
         }
     }
     pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {

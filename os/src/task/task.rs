@@ -1,6 +1,8 @@
 //! Types related to task management
+use alloc::vec::Vec;
+
 use super::TaskContext;
-use crate::config::TRAP_CONTEXT_BASE;
+use crate::config::{MAX_SYSCALL_NUM, TRAP_CONTEXT_BASE};
 use crate::mm::{
     kernel_stack_position, MapPermission, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE,
 };
@@ -28,6 +30,12 @@ pub struct TaskControlBlock {
 
     /// Program break
     pub program_brk: usize,
+
+    /// start_time
+    pub first_schedule_time: usize,
+
+    /// syscall count
+    pub syscall_count: Vec<u32>,
 }
 
 impl TaskControlBlock {
@@ -55,6 +63,8 @@ impl TaskControlBlock {
             kernel_stack_top.into(),
             MapPermission::R | MapPermission::W,
         );
+        let mut syscall_count = Vec::<u32>::new();
+        syscall_count.resize(MAX_SYSCALL_NUM, 0);
         let task_control_block = Self {
             task_status,
             task_cx: TaskContext::goto_trap_return(kernel_stack_top),
@@ -63,6 +73,8 @@ impl TaskControlBlock {
             base_size: user_sp,
             heap_bottom: user_sp,
             program_brk: user_sp,
+            first_schedule_time: 0,
+            syscall_count: syscall_count
         };
         // prepare TrapContext in user space
         let trap_cx = task_control_block.get_trap_cx();

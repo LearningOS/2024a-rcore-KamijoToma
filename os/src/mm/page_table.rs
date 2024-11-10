@@ -1,6 +1,10 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
 
+use core::mem::size_of;
+use core::slice::from_raw_parts;
+
 use super::{frame_alloc, FrameTracker, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::*;
@@ -143,6 +147,20 @@ impl PageTable {
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
         self.find_pte(vpn).map(|pte| *pte)
     }
+
+    /// get a u8 data from a VirtAddr
+    pub fn translate_va(&self, va: VirtAddr) -> Option<&'static mut u8> {
+        let vpn = va.floor();
+        if let Some(ppe) = self.translate(vpn) {
+            if !ppe.readable() {
+                return None;
+            }
+            let ppn = ppe.ppn();
+            return Some(&mut ppn.get_bytes_array()[va.page_offset()]);
+        }
+        None
+    }
+
     /// get the token from the page table
     pub fn token(&self) -> usize {
         8usize << 60 | self.root_ppn.0
@@ -170,4 +188,80 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
         start = end_va.into();
     }
     v
+}
+
+/// translate&copy a buffer, but mutable
+#[allow(unused)]
+pub fn translated_byte_buffer_mut(
+    token: usize,
+    ptr: *const u8,
+    len: usize,
+) -> Option<Vec<&'static mut [u8]>> {
+    let page_table = PageTable::from_token(token);
+    let mut start = ptr as usize;
+    let end = start + len;
+    let mut v = Vec::new();
+    while start < end {
+        let start_va = VirtAddr::from(start);
+        let mut vpn = start_va.floor();
+        let ppe = page_table.translate(vpn).unwrap();
+        if !ppe.readable() || !ppe.writable() {
+            return None;
+        }
+        let ppn = ppe.ppn();
+        vpn.step();
+        let mut end_va = VirtAddr::from(vpn);
+        end_va = end_va.min(VirtAddr::from(end));
+        if end_va.page_offset() == 0 {
+            v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..])
+        } else {
+            v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..end_va.page_offset()]);
+        }
+        start = end_va.into();
+    }
+    Some(v)
+}
+
+/// translate str
+#[allow(unused)]
+pub fn translate_str(token: usize, ptr: *const u8) -> Option<String> {
+    let page_table = PageTable::from_token(token);
+    let mut string = String::new();
+    let mut start = ptr as usize;
+    loop {
+        if let Some(ch) = page_table.translate_va(VirtAddr::from(start)) {
+            if *ch == 0 {
+                break;
+            } else {
+                string.push(*ch as char);
+                start += 1;
+            }
+        } else {
+            return None;
+        }
+    }
+    Some(string)
+}
+
+/// memcpy with translation
+#[allow(unused)]
+pub fn translate_memcopy<T>(token: usize, ptr: *const u8, source: &T) -> Result<(), ()>
+where
+    T: Sized,
+{
+    if let Some(dst_list) = translated_byte_buffer_mut(token, ptr, size_of::<T>()) {
+        unsafe {
+            let src = from_raw_parts(source as *const T as *const u8, size_of::<T>());
+            let mut start = 0usize;
+            let mut end = 0usize;
+            for dst in dst_list {
+                end += dst.len();
+                dst.copy_from_slice(&src[start..end]);
+                start = end;
+            }
+        }
+        Ok(())
+    } else {
+        Err(())
+    }
 }
